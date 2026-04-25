@@ -26,6 +26,7 @@ export default function HomePage() {
   const [listingUrl, setListingUrl] = useState("");
   const [address, setAddress] = useState("");
   const [voiceStyle, setVoiceStyle] = useState("friendly luxury real-estate tour");
+  const [maxPhotos, setMaxPhotos] = useState(8);
   const [job, setJob] = useState<JobView | null>(null);
   const [loading, setLoading] = useState(false);
 
@@ -46,7 +47,8 @@ export default function HomePage() {
         body: JSON.stringify({
           listing_url: listingUrl || undefined,
           address: address || undefined,
-          voice_style: voiceStyle
+          voice_style: voiceStyle,
+          max_photos: maxPhotos
         })
       });
       if (!response.ok) {
@@ -100,6 +102,20 @@ export default function HomePage() {
         <label htmlFor="voice">Voice style</label>
         <textarea id="voice" rows={3} value={voiceStyle} onChange={(event) => setVoiceStyle(event.target.value)} />
 
+        <label htmlFor="maxPhotos">Max photos</label>
+        <input
+          id="maxPhotos"
+          type="number"
+          min={4}
+          max={12}
+          value={maxPhotos}
+          onChange={(event) => {
+            const parsed = Number(event.target.value || 8);
+            const clamped = Math.max(4, Math.min(12, Number.isFinite(parsed) ? parsed : 8));
+            setMaxPhotos(clamped);
+          }}
+        />
+
         <button type="submit" disabled={loading}>
           {loading ? "Generating..." : "Generate walkthrough"}
         </button>
@@ -111,6 +127,12 @@ export default function HomePage() {
           <div>ID: {job.id}</div>
           <div>Status: {job.status}</div>
           {job.progress ? <div>Progress: {job.progress}</div> : null}
+          {typeof job.artifacts?.raw_photo_count === "number" ? (
+            <div>
+              Frame selection: {String(job.artifacts?.selected_unique_photo_count ?? 0)} unique from{" "}
+              {String(job.artifacts?.raw_photo_count)} raw photos
+            </div>
+          ) : null}
           {job.error ? <div style={{ color: "#fca5a5" }}>Error: {job.error}</div> : null}
 
           {job.status === "completed" ? (

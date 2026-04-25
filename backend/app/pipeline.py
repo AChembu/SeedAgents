@@ -31,6 +31,25 @@ def _cycle_to_count(items: list[Path], target_count: int) -> list[Path]:
     return out
 
 
+async def _download_and_select_raw_frames(
+    listing_image_urls: list[str],
+    raw_dir: Path,
+    matcher: HomeConsistencyModel,
+    max_photos: int,
+) -> tuple[list[Path], list[Path]]:
+    raw_paths: list[Path] = []
+    for idx, image_url in enumerate(listing_image_urls, start=1):
+        raw_path = raw_dir / f"photo_{idx}.jpg"
+        await download_image(str(image_url), raw_path)
+        await asyncio.to_thread(normalize_jpeg, raw_path)
+        raw_paths.append(raw_path)
+
+    selected_raw_paths = await asyncio.to_thread(matcher.select_consistent_images, raw_paths, max_photos)
+    if not selected_raw_paths:
+        selected_raw_paths = raw_paths[:1]
+    return raw_paths, selected_raw_paths
+
+
 async def run_generation_job(
     settings: Settings,
     request: GenerateRequest,
@@ -45,7 +64,7 @@ async def run_generation_job(
     set_state(status=JobStatus.running, progress="Reading listing data")
     if request.listing_url:
         try:
-            listing = await scrape_listing(str(request.listing_url), max_photos=request.max_photos)
+            listing = await scrape_listing(str(request.listing_url), max_photos=request.max_photos, settings=settings)
         except Exception:
             # Many listing sites (e.g., Zillow) block bot-like scraping; degrade gracefully.
             fallback_address = request.address or "Requested property listing"
@@ -71,17 +90,46 @@ async def run_generation_job(
     matcher = HomeConsistencyModel()
 
     set_state(progress="Downloading listing photos")
-    raw_paths: list[Path] = []
-    for idx, image_url in enumerate(listing.image_urls, start=1):
-        raw_path = raw_dir / f"photo_{idx}.jpg"
-        await download_image(str(image_url), raw_path)
-        await asyncio.to_thread(normalize_jpeg, raw_path)
-        raw_paths.append(raw_path)
+    raw_paths, selected_raw_paths = await _download_and_select_raw_frames(
+        [str(url) for url in listing.image_urls],
+        raw_dir,
+        matcher,
+        request.max_photos,
+    )
 
     set_state(progress="Validating photos match the same property")
-    selected_raw_paths = await asyncio.to_thread(matcher.select_consistent_images, raw_paths, request.max_photos)
-    if not selected_raw_paths:
-        selected_raw_paths = raw_paths[:1]
+    selected_unique_count = len(selected_raw_paths)
+
+    # If extraction quality is poor and Firecrawl is configured, re-scrape with rendered content.
+    if (
+        request.listing_url
+        and selected_unique_count < settings.min_unique_story_frames
+        and settings.use_firecrawl
+        and settings.firecrawl_api_key
+    ):
+        try:
+            set_state(progress="Low frame diversity detected, retrying scrape with Firecrawl")
+            better_listing = await scrape_listing(
+                str(request.listing_url),
+                max_photos=request.max_photos * 3,
+                settings=settings,
+                force_firecrawl=True,
+            )
+            better_raw_paths, better_selected = await _download_and_select_raw_frames(
+                [str(url) for url in better_listing.image_urls],
+                raw_dir,
+                matcher,
+                request.max_photos,
+            )
+            if len(better_selected) > selected_unique_count:
+                listing = better_listing
+                raw_paths = better_raw_paths
+                selected_raw_paths = better_selected
+                selected_unique_count = len(selected_raw_paths)
+        except Exception:
+            # Keep original scrape result when Firecrawl retry fails.
+            pass
+
     selected_raw_paths = _cycle_to_count(selected_raw_paths, request.max_photos)
 
     set_state(progress="Polishing keyframe photos")
@@ -130,7 +178,11 @@ async def run_generation_job(
 
     return {
         "listing": listing.model_dump(mode="json"),
+        "raw_photo_count": len(raw_paths),
         "selected_photo_count": len(selected_raw_paths),
+        "selected_unique_photo_count": selected_unique_count,
+        "selected_photos": [path.name for path in selected_raw_paths],
+        "selected_source_urls": [str(url) for url in listing.image_urls],
         "storyboard": storyboard.model_dump(mode="json"),
         "narration_file": str(narration_path),
         "video_file": str(final_video_path),

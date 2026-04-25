@@ -13,6 +13,7 @@ cp .env.example .env
 ```
 
 Update `.env` with your keys. Keep `USE_MOCK_MODE=true` for local dry-runs, then switch to `false` to hit real APIs.
+For harder listing sites (like Zillow), optionally set `USE_FIRECRAWL=true` and add `FIRECRAWL_API_KEY`.
 
 ### Recommended key placement
 
@@ -55,6 +56,8 @@ Open [http://localhost:3000](http://localhost:3000).
 - The BytePlus/ModelArk API surface can differ by region/account; base URLs and payload keys are configurable in code under `backend/app/seed_clients.py`.
 - If a listing blocks scraping, submit an address instead to generate a fallback demo.
 - With limited credits, validate flow with `USE_MOCK_MODE=true` first, then switch to real mode only for final renders.
+- The pipeline includes a house-consistency + diversity selector to keep frames on-property and avoid repetitive near-duplicates.
+- If `MIN_UNIQUE_STORY_FRAMES` is not met and Firecrawl is enabled, the backend retries with rendered scraping before composing video.
 
 ## Event & submission
 

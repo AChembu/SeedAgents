@@ -42,6 +42,12 @@ class Settings(BaseSettings):
     request_timeout_s: int = 60
     poll_interval_s: int = 6
     poll_timeout_s: int = 240
+    min_unique_story_frames: int = 4
+
+    # Optional scrape fallback that can bypass anti-bot pages.
+    use_firecrawl: bool = False
+    firecrawl_api_key: str = Field(default="")
+    firecrawl_base_url: str = Field(default="https://api.firecrawl.dev/v1")
 
     def seedance_key_pool(self) -> list[str]:
         return [k.strip() for k in self.seedance_api_keys.split(",") if k.strip()]
