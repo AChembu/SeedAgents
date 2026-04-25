@@ -17,3 +17,5 @@ out/
 backend/generated/
 generated/
 backend/.ruff_cache/
+backend/tmp_test/
+backend/tmp_local_test/

@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import Settings
+from .home_matcher import HomeConsistencyModel
 from .llm import build_storyboard
 from .media import compose_from_clips, compose_from_images, download_image, download_video, normalize_jpeg
 from .models import GenerateRequest, JobStatus
@@ -15,6 +16,19 @@ from .seed_clients import SeedSpeechClient, SeedanceClient, SeedreamClient
 def _ensure_dir(path: Path) -> Path:
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def _cycle_to_count(items: list[Path], target_count: int) -> list[Path]:
+    if not items:
+        return []
+    if len(items) >= target_count:
+        return items[:target_count]
+    out = list(items)
+    idx = 0
+    while len(out) < target_count:
+        out.append(items[idx % len(items)])
+        idx += 1
+    return out
 
 
 async def run_generation_job(
@@ -54,17 +68,30 @@ async def run_generation_job(
     seedream = SeedreamClient(settings)
     seedance = SeedanceClient(settings)
     speech = SeedSpeechClient(settings)
+    matcher = HomeConsistencyModel()
 
-    set_state(progress="Downloading and polishing listing photos")
-    polished_paths: list[Path] = []
+    set_state(progress="Downloading listing photos")
+    raw_paths: list[Path] = []
     for idx, image_url in enumerate(listing.image_urls, start=1):
         raw_path = raw_dir / f"photo_{idx}.jpg"
         await download_image(str(image_url), raw_path)
         await asyncio.to_thread(normalize_jpeg, raw_path)
+        raw_paths.append(raw_path)
+
+    set_state(progress="Validating photos match the same property")
+    selected_raw_paths = await asyncio.to_thread(matcher.select_consistent_images, raw_paths, request.max_photos)
+    if not selected_raw_paths:
+        selected_raw_paths = raw_paths[:1]
+    selected_raw_paths = _cycle_to_count(selected_raw_paths, request.max_photos)
+
+    set_state(progress="Polishing keyframe photos")
+    polished_paths: list[Path] = []
+    for idx, raw_path in enumerate(selected_raw_paths, start=1):
+        scene_index = (idx - 1) % len(storyboard.scenes)
 
         polish_prompt = (
             f"Polished real-estate keyframe, bright and realistic lighting, "
-            f"premium architectural photography style. Scene note: {storyboard.scenes[(idx - 1) % len(storyboard.scenes)]}"
+            f"premium architectural photography style. Scene note: {storyboard.scenes[scene_index]}"
         )
         polished_path = polished_dir / f"keyframe_{idx}.jpg"
         await seedream.polish_keyframe(raw_path, polish_prompt, polished_path)
@@ -103,6 +130,7 @@ async def run_generation_job(
 
     return {
         "listing": listing.model_dump(mode="json"),
+        "selected_photo_count": len(selected_raw_paths),
         "storyboard": storyboard.model_dump(mode="json"),
         "narration_file": str(narration_path),
         "video_file": str(final_video_path),

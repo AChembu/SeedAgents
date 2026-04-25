@@ -90,14 +90,10 @@ async def scrape_listing(url: str, max_photos: int = 6) -> ListingData:
         if len(images) >= max_photos:
             break
 
-    # Hackathon fallback: if listing site is sparse/blocked, pad with stock photos
-    # so the final video still feels like a walkthrough.
-    if len(images) < max_photos:
-        for stock in _stock_property_images(max_photos):
-            if stock not in images:
-                images.append(stock)
-            if len(images) >= max_photos:
-                break
+    # Keep only source-listing imagery here. If there are too few images,
+    # later pipeline stages will duplicate consistent frames rather than inject random houses.
+    if len(images) < 1:
+        images = _stock_property_images(max_photos=1)
 
     return ListingData(
         title=title,
