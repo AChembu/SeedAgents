@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:www.opennote.com)",
+      "Bash(npx --no-install tsc --noEmit)",
+      "Bash(npx --no-install next build)"
+    ]
+  }
+}

@@ -17,7 +17,7 @@ class GenerateRequest(BaseModel):
     address: str | None = None
     voice_style: str = "friendly luxury real-estate tour"
     include_neighborhood_copy: bool = True
-    max_photos: int = Field(default=6, ge=2, le=12)
+    max_photos: int = Field(default=8, ge=2, le=12)
 
 
 class ListingData(BaseModel):

@@ -1,11 +1,43 @@
 from __future__ import annotations
 
 import json
+import re
 
 import httpx
 
 from .config import Settings
 from .models import ListingData, Storyboard
+
+
+def _sanitize_for_voice(text: str) -> str:
+    cleaned = text
+    # Remove MLS mention patterns that sound awkward in narration.
+    cleaned = re.sub(r"\bmls\s*(number|#|no\.?)?\s*[:#-]?\s*[a-z0-9-]+\b", "", cleaned, flags=re.IGNORECASE)
+    # Remove explicit Zillow branding mentions.
+    cleaned = re.sub(r"\bzillow\b", "", cleaned, flags=re.IGNORECASE)
+    # Collapse separators and whitespace artifacts left by removals.
+    cleaned = re.sub(r"\s*[\|\-–]\s*", " ", cleaned)
+    cleaned = re.sub(r"\s{2,}", " ", cleaned).strip(" ,.-")
+    return cleaned
+
+
+def _clean_listing_for_prompt(listing: ListingData) -> ListingData:
+    return ListingData(
+        title=_sanitize_for_voice(listing.title),
+        description=_sanitize_for_voice(listing.description),
+        address=_sanitize_for_voice(listing.address or "") or None,
+        image_urls=listing.image_urls,
+        source_url=listing.source_url,
+    )
+
+
+def _clean_storyboard_text(storyboard: Storyboard) -> Storyboard:
+    return Storyboard(
+        hook=_sanitize_for_voice(storyboard.hook),
+        scenes=[_sanitize_for_voice(scene) for scene in storyboard.scenes],
+        cta=_sanitize_for_voice(storyboard.cta),
+        full_script=_sanitize_for_voice(storyboard.full_script),
+    )
 
 
 def _fallback_storyboard(listing: ListingData) -> Storyboard:
@@ -51,10 +83,11 @@ async def build_storyboard(
     voice_style: str,
     include_neighborhood_copy: bool,
 ) -> Storyboard:
+    cleaned_listing = _clean_listing_for_prompt(listing)
     if settings.use_mock_mode:
-        return _fallback_storyboard(listing)
+        return _clean_storyboard_text(_fallback_storyboard(cleaned_listing))
 
-    prompt = _build_prompt(listing, voice_style, include_neighborhood_copy)
+    prompt = _build_prompt(cleaned_listing, voice_style, include_neighborhood_copy)
     try:
         if settings.script_provider == "anthropic" and settings.anthropic_api_key:
             async with httpx.AsyncClient(timeout=settings.request_timeout_s) as client:
@@ -94,11 +127,12 @@ async def build_storyboard(
             return _fallback_storyboard(listing)
 
         parsed = json.loads(content)
-        return Storyboard(
+        storyboard = Storyboard(
             hook=parsed["hook"],
             scenes=parsed["scenes"],
             cta=parsed["cta"],
             full_script=parsed["full_script"],
         )
+        return _clean_storyboard_text(storyboard)
     except Exception:
-        return _fallback_storyboard(listing)
+        return _clean_storyboard_text(_fallback_storyboard(cleaned_listing))

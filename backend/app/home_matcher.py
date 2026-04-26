@@ -23,6 +23,7 @@ class HomeConsistencyModel:
     min_aspect_ratio: float = 0.6
     max_aspect_ratio: float = 2.2
     dedupe_hamming_threshold: int = 6
+    max_pair_similarity: float = 0.94
 
     def _passes_photo_quality_gate(self, path: Path) -> bool:
         if path.stat().st_size < self.min_file_size_bytes:
@@ -129,21 +130,42 @@ class HomeConsistencyModel:
             return consistent[:max_count]
 
         # Diversity pass: farthest-point sampling on embedding distance
-        # to avoid repetitive near-identical exterior angles.
+        # plus a hard pairwise-similarity cap to avoid same-room duplicates.
         emb_map = {path: self._embed(path) for path in consistent}
-        chosen: list[Path] = [consistent[0]]
-        remaining = consistent[1:]
+        chosen: list[Path] = []
+        remaining = list(consistent)
+
+        # Start with medoid-like representative.
+        chosen.append(remaining.pop(0))
+
         while remaining and len(chosen) < max_count:
-            best_path = remaining[0]
+            best_path: Path | None = None
             best_distance = -1.0
             for candidate in remaining:
-                min_distance = min(
-                    1.0 - self._cosine(emb_map[candidate], emb_map[chosen_item]) for chosen_item in chosen
-                )
+                pair_sims = [self._cosine(emb_map[candidate], emb_map[chosen_item]) for chosen_item in chosen]
+                if pair_sims and max(pair_sims) >= self.max_pair_similarity:
+                    # Too close to an already-selected view; likely same room/angle cluster.
+                    continue
+                min_distance = min(1.0 - sim for sim in pair_sims) if pair_sims else 1.0
                 if min_distance > best_distance:
                     best_distance = min_distance
                     best_path = candidate
+
+            if best_path is None:
+                break
             chosen.append(best_path)
             remaining = [item for item in remaining if item != best_path]
+
+        # If filter is too strict, backfill with best remaining non-identical options.
+        if len(chosen) < min(max_count, len(consistent)):
+            for candidate in consistent:
+                if candidate in chosen:
+                    continue
+                pair_sims = [self._cosine(emb_map[candidate], emb_map[chosen_item]) for chosen_item in chosen]
+                if pair_sims and max(pair_sims) >= 0.985:
+                    continue
+                chosen.append(candidate)
+                if len(chosen) >= max_count:
+                    break
 
         return chosen[:max_count]

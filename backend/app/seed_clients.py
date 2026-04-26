@@ -26,45 +26,59 @@ class SeedanceKeyRotator:
 class SeedreamClient:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
+        self._rotator = SeedanceKeyRotator(settings.seedream_key_pool())
 
     async def polish_keyframe(self, image_path: Path, prompt: str, out_path: Path) -> Path:
-        if self.settings.use_mock_mode or not self.settings.seedream_api_key:
+        key_pool = self.settings.seedream_key_pool()
+        if self.settings.use_mock_mode or not key_pool:
             await asyncio.to_thread(_mock_polish_image, image_path, out_path)
             return out_path
 
         # NOTE: ModelArk surface changes by account/region.
         # This payload shape is intentionally conservative and override-friendly.
-        async with httpx.AsyncClient(timeout=self.settings.request_timeout_s) as client:
-            with image_path.open("rb") as img_fp:
-                files = {"file": (image_path.name, img_fp, "image/jpeg")}
-                upload = await client.post(
-                    f"{self.settings.seedream_base_url}/files",
-                    headers={"Authorization": f"Bearer {self.settings.seedream_api_key}"},
-                    files=files,
-                )
-                upload.raise_for_status()
-                upload_id = upload.json().get("id")
+        last_exc: Exception | None = None
+        for _ in range(len(key_pool)):
+            key = self._rotator.next()
+            if not key:
+                continue
+            try:
+                async with httpx.AsyncClient(timeout=self.settings.request_timeout_s) as client:
+                    with image_path.open("rb") as img_fp:
+                        files = {"file": (image_path.name, img_fp, "image/jpeg")}
+                        upload = await client.post(
+                            f"{self.settings.seedream_base_url}/files",
+                            headers={"Authorization": f"Bearer {key}"},
+                            files=files,
+                        )
+                        upload.raise_for_status()
+                        upload_id = upload.json().get("id")
 
-            job = await client.post(
-                f"{self.settings.seedream_base_url}/images/generations",
-                headers={"Authorization": f"Bearer {self.settings.seedream_api_key}"},
-                json={
-                    "model": self.settings.seedream_model,
-                    "prompt": prompt,
-                    "image_ids": [upload_id],
-                    "size": "16:9",
-                    "n": 1,
-                },
-            )
-            job.raise_for_status()
-            result_url = job.json().get("data", [{}])[0].get("url")
+                    job = await client.post(
+                        f"{self.settings.seedream_base_url}/images/generations",
+                        headers={"Authorization": f"Bearer {key}"},
+                        json={
+                            "model": self.settings.seedream_model,
+                            "prompt": prompt,
+                            "image_ids": [upload_id],
+                            "size": "16:9",
+                            "n": 1,
+                        },
+                    )
+                    job.raise_for_status()
+                    result_url = job.json().get("data", [{}])[0].get("url")
 
-            if not result_url:
-                raise RuntimeError("Seedream returned no image URL.")
-            data = await client.get(result_url)
-            data.raise_for_status()
-            out_path.write_bytes(data.content)
-            return out_path
+                    if not result_url:
+                        raise RuntimeError("Seedream returned no image URL.")
+                    data = await client.get(result_url)
+                    data.raise_for_status()
+                    out_path.write_bytes(data.content)
+                    return out_path
+            except Exception as exc:
+                last_exc = exc
+                continue
+        if last_exc:
+            raise last_exc
+        raise RuntimeError("No Seedream API key configured.")
 
 
 class SeedanceClient:
@@ -129,26 +143,88 @@ class SeedanceClient:
 class SeedSpeechClient:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
+        self._rotator = SeedanceKeyRotator(settings.seed_speech_key_pool())
 
     async def synthesize(self, text: str, out_path: Path) -> Path:
-        if self.settings.use_mock_mode or not self.settings.seed_speech_api_key:
+        key_pool = self.settings.seed_speech_key_pool()
+        if self.settings.use_mock_mode:
+            # In mock mode, still try OpenAI TTS so preview runs can have narration.
+            if self.settings.openai_api_key:
+                try:
+                    async with httpx.AsyncClient(timeout=self.settings.request_timeout_s) as client:
+                        response = await client.post(
+                            "https://api.openai.com/v1/audio/speech",
+                            headers={
+                                "Authorization": f"Bearer {self.settings.openai_api_key}",
+                                "Content-Type": "application/json",
+                            },
+                            json={
+                                "model": "gpt-4o-mini-tts",
+                                "voice": "alloy",
+                                "input": text,
+                                "format": "mp3",
+                            },
+                        )
+                        response.raise_for_status()
+                        out_path.write_bytes(response.content)
+                        return out_path
+                except Exception:
+                    # Keep mock flow resilient; fallback to silent narration.
+                    pass
             # A silent placeholder file still allows front-end and video merge flow tests.
             out_path.write_bytes(b"")
             return out_path
 
-        async with httpx.AsyncClient(timeout=self.settings.request_timeout_s) as client:
-            response = await client.post(
-                f"{self.settings.seed_speech_base_url}/api/v1/tts",
-                headers={"Authorization": f"Bearer {self.settings.seed_speech_api_key}"},
-                json={
-                    "text": text,
-                    "voice_type": self.settings.seed_speech_voice,
-                    "encoding": "mp3",
-                },
-            )
-            response.raise_for_status()
-            out_path.write_bytes(response.content)
-            return out_path
+        last_exc: Exception | None = None
+        if key_pool:
+            for _ in range(len(key_pool)):
+                key = self._rotator.next()
+                if not key:
+                    continue
+                try:
+                    async with httpx.AsyncClient(timeout=self.settings.request_timeout_s) as client:
+                        response = await client.post(
+                            f"{self.settings.seed_speech_base_url}/api/v1/tts",
+                            headers={"Authorization": f"Bearer {key}"},
+                            json={
+                                "text": text,
+                                "voice_type": self.settings.seed_speech_voice,
+                                "encoding": "mp3",
+                            },
+                        )
+                        response.raise_for_status()
+                        out_path.write_bytes(response.content)
+                        return out_path
+                except Exception as exc:
+                    last_exc = exc
+                    continue
+
+        # Fallback: use OpenAI TTS if configured.
+        if self.settings.openai_api_key:
+            try:
+                async with httpx.AsyncClient(timeout=self.settings.request_timeout_s) as client:
+                    response = await client.post(
+                        "https://api.openai.com/v1/audio/speech",
+                        headers={
+                            "Authorization": f"Bearer {self.settings.openai_api_key}",
+                            "Content-Type": "application/json",
+                        },
+                        json={
+                            "model": "gpt-4o-mini-tts",
+                            "voice": "alloy",
+                            "input": text,
+                            "format": "mp3",
+                        },
+                    )
+                    response.raise_for_status()
+                    out_path.write_bytes(response.content)
+                    return out_path
+            except Exception as exc:
+                last_exc = exc
+
+        if last_exc:
+            raise last_exc
+        raise RuntimeError("No speech provider key configured.")
 
 
 def _mock_polish_image(image_path: Path, out_path: Path) -> None:

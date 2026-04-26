@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import logging
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -12,23 +14,12 @@ from .models import GenerateRequest, JobStatus
 from .scraper import listing_from_address, scrape_listing
 from .seed_clients import SeedSpeechClient, SeedanceClient, SeedreamClient
 
+logger = logging.getLogger(__name__)
+
 
 def _ensure_dir(path: Path) -> Path:
     path.mkdir(parents=True, exist_ok=True)
     return path
-
-
-def _cycle_to_count(items: list[Path], target_count: int) -> list[Path]:
-    if not items:
-        return []
-    if len(items) >= target_count:
-        return items[:target_count]
-    out = list(items)
-    idx = 0
-    while len(out) < target_count:
-        out.append(items[idx % len(items)])
-        idx += 1
-    return out
 
 
 async def _download_and_select_raw_frames(
@@ -56,27 +47,33 @@ async def run_generation_job(
     job_id: str,
     set_state,
 ) -> dict[str, Any]:
+    def set_progress(message: str) -> None:
+        set_state(progress=message)
+        logger.info("job=%s step=%s", job_id, message)
+
     work_dir = _ensure_dir(settings.output_dir / job_id)
     raw_dir = _ensure_dir(work_dir / "raw")
     polished_dir = _ensure_dir(work_dir / "polished")
     clips_dir = _ensure_dir(work_dir / "clips")
 
     set_state(status=JobStatus.running, progress="Reading listing data")
+    logger.info("job=%s started max_photos=%s", job_id, request.max_photos)
     if request.listing_url:
         try:
             listing = await scrape_listing(str(request.listing_url), max_photos=request.max_photos, settings=settings)
         except Exception:
             # Many listing sites (e.g., Zillow) block bot-like scraping; degrade gracefully.
+            logger.exception("job=%s scrape failed, using address fallback", job_id)
             fallback_address = request.address or "Requested property listing"
             listing = listing_from_address(fallback_address, max_photos=request.max_photos)
             listing.source_url = request.listing_url
-            set_state(progress="Listing site blocked scraping; using address fallback data")
+            set_progress("Listing site blocked scraping; using address fallback data")
     elif request.address:
         listing = listing_from_address(request.address, max_photos=request.max_photos)
     else:
         raise ValueError("Either listing_url or address must be provided.")
 
-    set_state(progress="Writing narration and scene plan")
+    set_progress("Writing narration and scene plan")
     storyboard = await build_storyboard(
         settings,
         listing,
@@ -89,16 +86,18 @@ async def run_generation_job(
     speech = SeedSpeechClient(settings)
     matcher = HomeConsistencyModel()
 
-    set_state(progress="Downloading listing photos")
+    set_progress("Downloading listing photos")
     raw_paths, selected_raw_paths = await _download_and_select_raw_frames(
         [str(url) for url in listing.image_urls],
         raw_dir,
         matcher,
         request.max_photos,
     )
+    logger.info("job=%s downloaded_raw=%s", job_id, len(raw_paths))
 
-    set_state(progress="Validating photos match the same property")
+    set_progress("Validating photos match the same property")
     selected_unique_count = len(selected_raw_paths)
+    logger.info("job=%s selected_consistent=%s", job_id, selected_unique_count)
 
     # If extraction quality is poor and Firecrawl is configured, re-scrape with rendered content.
     if (
@@ -108,7 +107,7 @@ async def run_generation_job(
         and settings.firecrawl_api_key
     ):
         try:
-            set_state(progress="Low frame diversity detected, retrying scrape with Firecrawl")
+            set_progress("Low frame diversity detected, retrying scrape with Firecrawl")
             better_listing = await scrape_listing(
                 str(request.listing_url),
                 max_photos=request.max_photos * 3,
@@ -126,13 +125,31 @@ async def run_generation_job(
                 raw_paths = better_raw_paths
                 selected_raw_paths = better_selected
                 selected_unique_count = len(selected_raw_paths)
+                logger.info("job=%s firecrawl_retry_improved selected=%s", job_id, selected_unique_count)
         except Exception:
             # Keep original scrape result when Firecrawl retry fails.
+            logger.exception("job=%s firecrawl retry failed; keeping original scrape", job_id)
             pass
 
-    selected_raw_paths = _cycle_to_count(selected_raw_paths, request.max_photos)
+    # Never duplicate photos. Use up to user max or available unique photos.
+    target_count = min(request.max_photos, len(raw_paths))
+    if len(selected_raw_paths) < target_count:
+        selected_set = set(selected_raw_paths)
+        for raw in raw_paths:
+            if raw not in selected_set:
+                selected_raw_paths.append(raw)
+                selected_set.add(raw)
+            if len(selected_raw_paths) >= target_count:
+                break
+    selected_raw_paths = selected_raw_paths[:target_count]
+    logger.info(
+        "job=%s final_frame_selection target=%s selected=%s",
+        job_id,
+        target_count,
+        len(selected_raw_paths),
+    )
 
-    set_state(progress="Polishing keyframe photos")
+    set_progress("Polishing keyframe photos")
     polished_paths: list[Path] = []
     for idx, raw_path in enumerate(selected_raw_paths, start=1):
         scene_index = (idx - 1) % len(storyboard.scenes)
@@ -142,42 +159,71 @@ async def run_generation_job(
             f"premium architectural photography style. Scene note: {storyboard.scenes[scene_index]}"
         )
         polished_path = polished_dir / f"keyframe_{idx}.jpg"
-        await seedream.polish_keyframe(raw_path, polish_prompt, polished_path)
+        try:
+            await seedream.polish_keyframe(raw_path, polish_prompt, polished_path)
+        except Exception as exc:
+            # If image model/API is unavailable, keep pipeline moving with original frame.
+            logger.warning(
+                "job=%s keyframe_polish_failed idx=%s fallback=raw_copy err=%s",
+                job_id,
+                idx,
+                exc,
+            )
+            shutil.copy2(raw_path, polished_path)
         polished_paths.append(polished_path)
 
-    set_state(progress="Generating voice narration")
+    set_progress("Generating voice narration")
     narration_path = work_dir / "narration.mp3"
-    await speech.synthesize(storyboard.full_script, narration_path)
+    try:
+        await speech.synthesize(storyboard.full_script, narration_path)
+        logger.info("job=%s narration_ready bytes=%s", job_id, narration_path.stat().st_size if narration_path.exists() else 0)
+    except Exception as exc:
+        # Keep output renderable when TTS endpoint/network is unavailable.
+        logger.warning("job=%s narration_failed continuing_without_audio err=%s", job_id, exc)
+        narration_path.write_bytes(b"")
+        set_progress("Voice API unavailable, continuing without narration")
 
-    set_state(progress="Generating Seedance walkthrough clips")
+    set_progress("Generating Seedance walkthrough clips")
     clip_paths: list[Path] = []
     for idx, polished in enumerate(polished_paths, start=1):
         motion_prompt = (
             "Cinematic real-estate walkthrough motion, smooth dolly-in and gentle pan, "
             f"ultra realistic details. Scene: {storyboard.scenes[(idx - 1) % len(storyboard.scenes)]}"
         )
-        clip_url = await seedance.image_to_video(polished, motion_prompt)
+        try:
+            clip_url = await seedance.image_to_video(polished, motion_prompt)
+        except Exception as exc:
+            # Fall back to image-based compose if video generation fails.
+            logger.warning("job=%s seedance_failed idx=%s; skipping clip err=%s", job_id, idx, exc)
+            continue
         if clip_url.startswith("mock://"):
+            logger.info("job=%s seedance_mock_clip idx=%s", job_id, idx)
             continue
         clip_path = clips_dir / f"clip_{idx}.mp4"
         await download_video(clip_url, clip_path)
         clip_paths.append(clip_path)
+        logger.info("job=%s clip_downloaded idx=%s path=%s", job_id, idx, clip_path.name)
 
-    set_state(progress="Composing final narrated walkthrough video")
+    set_progress("Composing final narrated walkthrough video")
     final_video_path = work_dir / "walkthrough.mp4"
     if clip_paths:
+        logger.info("job=%s compose_mode=clips clip_count=%s", job_id, len(clip_paths))
         await asyncio.to_thread(compose_from_clips, clip_paths, narration_path, final_video_path)
     else:
+        logger.info("job=%s compose_mode=images image_count=%s", job_id, len(polished_paths))
         await asyncio.to_thread(
             compose_from_images,
             polished_paths,
             narration_path,
             final_video_path,
             4.0,
+            settings.use_mock_mode,
         )
+    logger.info("job=%s complete output=%s", job_id, final_video_path)
 
     return {
         "listing": listing.model_dump(mode="json"),
+        "requested_max_photos": request.max_photos,
         "raw_photo_count": len(raw_paths),
         "selected_photo_count": len(selected_raw_paths),
         "selected_unique_photo_count": selected_unique_count,

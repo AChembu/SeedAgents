@@ -284,7 +284,7 @@ async def _fetch_firecrawl_html(url: str, settings: Settings) -> str | None:
 
 async def scrape_listing(
     url: str,
-    max_photos: int = 6,
+    max_photos: int = 8,
     settings: Settings | None = None,
     force_firecrawl: bool = False,
 ) -> ListingData:
@@ -342,7 +342,7 @@ async def scrape_listing(
     )
 
 
-def listing_from_address(address: str, max_photos: int = 6) -> ListingData:
+def listing_from_address(address: str, max_photos: int = 8) -> ListingData:
     # For MVP speed we synthesize a listing shell from an address if no URL is provided.
     stock_images = _stock_property_images(max_photos)
     return ListingData(

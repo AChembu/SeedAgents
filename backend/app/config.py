@@ -52,6 +52,12 @@ class Settings(BaseSettings):
     def seedance_key_pool(self) -> list[str]:
         return [k.strip() for k in self.seedance_api_keys.split(",") if k.strip()]
 
+    def seedream_key_pool(self) -> list[str]:
+        return [k.strip() for k in self.seedream_api_key.split(",") if k.strip()]
+
+    def seed_speech_key_pool(self) -> list[str]:
+        return [k.strip() for k in self.seed_speech_api_key.split(",") if k.strip()]
+
     def cors_origin_list(self) -> list[str]:
         return [item.strip() for item in self.cors_origins.split(",") if item.strip()]
 

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from pathlib import Path
+import subprocess
 from typing import Iterable
 
 import httpx
 import imageio.v2 as imageio
+import imageio_ffmpeg
 import numpy as np
 from moviepy import AudioFileClip, ImageClip, VideoFileClip, concatenate_videoclips, vfx
 from PIL import Image, ImageOps
@@ -56,22 +58,71 @@ def _compose_silent_fast(
     return out_path
 
 
+def _mux_audio_fast(video_path: Path, audio_path: Path, out_path: Path) -> Path:
+    ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+    cmd = [
+        ffmpeg,
+        "-y",
+        "-i",
+        str(video_path),
+        "-i",
+        str(audio_path),
+        "-c:v",
+        "copy",
+        "-c:a",
+        "aac",
+        "-shortest",
+        str(out_path),
+    ]
+    subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return out_path
+
+
 def compose_from_images(
     image_paths: Iterable[Path],
     audio_path: Path | None,
     out_path: Path,
     seconds_per_image: float = 4.0,
+    fast_mode: bool = False,
 ) -> Path:
+    images = list(image_paths)
+    if not images:
+        raise ValueError("No images provided for compose_from_images.")
+
     has_audio = bool(audio_path and audio_path.exists() and audio_path.stat().st_size > 0)
     if not has_audio:
         # Fast path for mock/no-audio runs; avoids long MoviePy render times.
-        return _compose_silent_fast(image_paths, out_path, seconds_per_image, fps=24)
+        return _compose_silent_fast(images, out_path, seconds_per_image, fps=24)
+
+    # Ensure video is long enough for full narration + small tail, avoiding abrupt audio cutoff.
+    assert audio_path is not None
+    try:
+        narration = AudioFileClip(str(audio_path))
+        required_total_duration = max(0.0, float(narration.duration)) + 0.45
+        narration.close()
+    except Exception:
+        required_total_duration = 0.0
+    if required_total_duration > 0:
+        seconds_per_image = max(seconds_per_image, required_total_duration / max(len(images), 1))
+
+    if fast_mode and audio_path is not None:
+        # Mock/preview mode: render frames fast and mux narration.
+        temp_video = out_path.with_name(f"{out_path.stem}.video_only.mp4")
+        try:
+            _compose_silent_fast(images, temp_video, seconds_per_image, fps=24)
+            return _mux_audio_fast(temp_video, audio_path, out_path)
+        except Exception:
+            # Fall back to the heavier MoviePy path if ffmpeg mux fails.
+            pass
+        finally:
+            if temp_video.exists():
+                temp_video.unlink()
 
     clips = [
         ImageClip(str(path))
         .with_duration(seconds_per_image)
         .with_effects([vfx.FadeIn(0.4), vfx.FadeOut(0.4)])
-        for path in image_paths
+        for path in images
     ]
     timeline = concatenate_videoclips(clips, method="compose")
     if has_audio:
