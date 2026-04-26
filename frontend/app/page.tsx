@@ -48,6 +48,7 @@ export default function HomePage() {
   const [maxPhotos, setMaxPhotos] = useState(8);
   const [job, setJob] = useState<JobView | null>(null);
   const [loading, setLoading] = useState(false);
+  const [formError, setFormError] = useState<string | null>(null);
 
   const resultVideo = useMemo(() => {
     const value = job?.artifacts?.video_rel_path;
@@ -57,20 +58,68 @@ export default function HomePage() {
 
   async function onSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    setFormError(null);
+
+    const trimmedUrl = listingUrl.trim();
+    const trimmedAddress = address.trim();
+    const trimmedVoice = voiceStyle.trim();
+
+    if (!trimmedUrl && !trimmedAddress) {
+      setFormError("Enter a listing URL or an address before generating.");
+      return;
+    }
+    if (trimmedUrl) {
+      try {
+        const parsed = new URL(trimmedUrl);
+        if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+          throw new Error("non-http");
+        }
+      } catch {
+        setFormError("That listing URL doesn't look like a valid web address.");
+        return;
+      }
+    }
+    if (!trimmedVoice) {
+      setFormError("Add a short narration direction so the agent knows the tone.");
+      return;
+    }
+    if (!Number.isInteger(maxPhotos) || maxPhotos < 4 || maxPhotos > 12) {
+      setFormError("Frames must be a whole number between four and twelve.");
+      return;
+    }
+
     setLoading(true);
     setJob(null);
     try {
-      const response = await fetch(`${API_BASE}/api/generate`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          listing_url: listingUrl || undefined,
-          address: address || undefined,
-          voice_style: voiceStyle,
-          max_photos: maxPhotos
-        })
-      });
-      if (!response.ok) throw new Error("Failed to queue generation");
+      let response: Response;
+      try {
+        response = await fetch(`${API_BASE}/api/generate`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            listing_url: trimmedUrl || undefined,
+            address: trimmedAddress || undefined,
+            voice_style: trimmedVoice,
+            max_photos: maxPhotos
+          })
+        });
+      } catch (networkError) {
+        throw new Error(
+          `Could not reach the API at ${API_BASE}. Make sure the backend is running.`
+        );
+      }
+      if (!response.ok) {
+        let detail = `Server returned ${response.status} ${response.statusText}`.trim();
+        try {
+          const body = await response.json();
+          if (body && typeof body.detail === "string" && body.detail) {
+            detail = body.detail;
+          }
+        } catch {
+          /* response was not JSON */
+        }
+        throw new Error(detail);
+      }
       const created: JobView = await response.json();
       setJob(created);
 
@@ -86,15 +135,25 @@ export default function HomePage() {
           break;
         }
         await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
-        current = await getJob(created.id);
-        setJob(current);
+        try {
+          current = await getJob(created.id);
+          setJob(current);
+        } catch (pollError) {
+          setJob({
+            ...current,
+            status: "failed",
+            error:
+              pollError instanceof Error
+                ? `Lost connection while polling: ${pollError.message}`
+                : "Lost connection while polling the job."
+          });
+          break;
+        }
       }
     } catch (error) {
-      setJob({
-        id: "n/a",
-        status: "failed",
-        error: error instanceof Error ? error.message : "Unknown error"
-      });
+      const message = error instanceof Error ? error.message : "Unknown error";
+      setFormError(message);
+      setJob(null);
     } finally {
       setLoading(false);
     }
@@ -122,23 +181,23 @@ export default function HomePage() {
               <span className="brand-name">
                 Seed<em>Estate</em>
               </span>
-              <span className="brand-sub">Field Studio · Vol. I</span>
+              <span className="brand-sub">Field Studio</span>
             </span>
           </a>
 
           <nav className="nav" aria-label="Primary">
-            <a href="#studio">Studio</a>
-            <a href="#worksheet">Worksheet</a>
-            <a href="#dossier">Dossier</a>
+            <a href="#home">Home</a>
+            <a href="#create">Create</a>
+            <a href="#result">Result</a>
           </nav>
 
-          <span className="masthead-meta">Local · Live · MMXXV</span>
+          <span className="masthead-meta">Live · MMXXV</span>
         </header>
 
         {/* ---------- HERO ---------- */}
-        <section className="hero" id="studio">
+        <section className="hero" id="home">
           <div className="hero-text reveal" style={{ animationDelay: "60ms" }}>
-            <span className="eyebrow">Vol. I — Real-estate walkthroughs</span>
+            <span className="eyebrow">Real-estate walkthroughs</span>
 
             <h1 className="hero-title">
               Listings, told <em>like</em> stories.
@@ -171,16 +230,16 @@ export default function HomePage() {
           </div>
         </section>
 
-        {/* ---------- WORKSHEET ---------- */}
-        <section className="worksheet" id="worksheet">
+        {/* ---------- CREATE ---------- */}
+        <section className="worksheet" id="create">
           <div className="section-head reveal">
-            <span className="folio">Worksheet № 01</span>
+            <span className="folio">Step 01 · Create</span>
             <h2>
-              Compose a <em>walkthrough.</em>
+              Make a <em>walkthrough.</em>
             </h2>
             <p>
-              Fields with hairlines accept input. Direction is open — be specific
-              about voice, pace, and audience. Defaults work well.
+              Fill in the fields below. Be specific about voice, pace, and audience —
+              the defaults work well if you&apos;re not sure.
             </p>
           </div>
 
@@ -270,6 +329,13 @@ export default function HomePage() {
               </div>
             </div>
 
+            {formError ? (
+              <div className="form-error" role="alert">
+                <strong>Check the form</strong>
+                {formError}
+              </div>
+            ) : null}
+
             <div className="submit-row">
               <button type="submit" className="primary" disabled={loading}>
                 {loading ? (
@@ -283,25 +349,22 @@ export default function HomePage() {
                   </>
                 )}
               </button>
-              <span className="submit-meta">
-                Typical render takes four to seven minutes — local, no telemetry.
-              </span>
             </div>
           </form>
         </section>
 
-        {/* ---------- DOSSIER ---------- */}
-        <section className="dossier" id="dossier">
+        {/* ---------- RESULT ---------- */}
+        <section className="dossier" id="result">
           <div className="section-head reveal">
             <span className="folio">
-              Dossier {job ? <>№ <span className="mono">{job.id.slice(0, 8)}</span></> : "№ —"}
+              Step 02 · Result {job ? <>· <span className="mono">{job.id.slice(0, 8)}</span></> : null}
             </span>
             <h2>
-              Field <em>report.</em>
+              Your <em>video.</em>
             </h2>
             <p>
               Each generation runs through five stages. The pipeline below tracks
-              progress in real time; artifacts and the final cut are filed beneath.
+              progress in real time; the final video appears once it&apos;s ready.
             </p>
           </div>
 
@@ -389,8 +452,8 @@ export default function HomePage() {
             </>
           ) : (
             <div className="empty-card reveal">
-              <em>No active job</em>
-              Submit a worksheet above and the dossier will populate here.
+              <em>Nothing here yet</em>
+              Fill in the form above and your video will appear here when it&apos;s ready.
             </div>
           )}
         </section>
@@ -400,7 +463,7 @@ export default function HomePage() {
           <span>SeedEstate Studio</span>
           <span className="dot">·</span>
           <em>Field-grown listings, narrated kindly.</em>
-          <span className="colophon-meta">Built locally · No telemetry · MMXXV</span>
+          <span className="colophon-meta">MMXXV</span>
         </footer>
       </div>
     </main>
