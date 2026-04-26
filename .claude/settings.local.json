@@ -3,7 +3,9 @@
     "allow": [
       "WebFetch(domain:www.opennote.com)",
       "Bash(npx --no-install tsc --noEmit)",
-      "Bash(npx --no-install next build)"
+      "Bash(npx --no-install next build)",
+      "Bash(python -c 'from app.scraper import _zillow_photos_url; *)",
+      "Bash(python -c \"from app.main import app; print\\('routes:'\\); [print\\(' ', r.path\\) for r in app.routes if hasattr\\(r, 'path'\\)]\")"
     ]
   }
 }

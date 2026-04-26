@@ -1,6 +1,9 @@
 "use client";
 
 import { FormEvent, useMemo, useState } from "react";
+import { Masthead } from "../components/Masthead";
+import { Colophon } from "../components/Colophon";
+import { ArrowGlyph } from "../components/Glyphs";
 
 type JobStatus = "queued" | "running" | "completed" | "failed";
 
@@ -171,28 +174,7 @@ export default function HomePage() {
       <div className="grain" aria-hidden />
 
       <div className="frame">
-        {/* ---------- MASTHEAD ---------- */}
-        <header className="masthead reveal">
-          <a className="brand" href="#top" aria-label="SeedEstate Field Studio">
-            <span className="brand-mark">
-              <SeedlingMark />
-            </span>
-            <span className="brand-text">
-              <span className="brand-name">
-                Seed<em>Estate</em>
-              </span>
-              <span className="brand-sub">Field Studio</span>
-            </span>
-          </a>
-
-          <nav className="nav" aria-label="Primary">
-            <a href="#home">Home</a>
-            <a href="#create">Create</a>
-            <a href="#result">Result</a>
-          </nav>
-
-          <span className="masthead-meta">Live · MMXXV</span>
-        </header>
+        <Masthead active="home" />
 
         {/* ---------- HERO ---------- */}
         <section className="hero" id="home">
@@ -458,47 +440,15 @@ export default function HomePage() {
           )}
         </section>
 
-        {/* ---------- COLOPHON ---------- */}
-        <footer className="colophon">
-          <span>SeedEstate Studio</span>
-          <span className="dot">·</span>
-          <em>Field-grown listings, narrated kindly.</em>
-          <span className="colophon-meta">MMXXV</span>
-        </footer>
+        <Colophon />
       </div>
     </main>
   );
 }
 
 /* ============================================================
-   SVG components
+   SVG components (page-specific)
    ============================================================ */
-
-function SeedlingMark() {
-  return (
-    <svg viewBox="0 0 24 24" fill="none" aria-hidden>
-      <path d="M12 22 V11" stroke="#1A1F12" strokeWidth="1.1" strokeLinecap="round" />
-      <path
-        d="M12 14 C 7.5 14, 5.5 11, 5 6.5 C 9.5 7.2, 11.2 9.5, 12 14 Z"
-        fill="#3E4A2A"
-      />
-      <path
-        d="M12 16 C 16.5 16, 18.5 13, 19 8.5 C 14.5 9.2, 12.8 11.5, 12 16 Z"
-        fill="#6E7E47"
-      />
-      <path d="M7 22 H 17" stroke="#1A1F12" strokeWidth="0.8" strokeLinecap="round" opacity="0.5" />
-    </svg>
-  );
-}
-
-function ArrowGlyph() {
-  return (
-    <svg viewBox="0 0 24 24" fill="none" aria-hidden>
-      <path d="M4 12 H 20" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
-      <path d="M14 6 L 20 12 L 14 18" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" fill="none" />
-    </svg>
-  );
-}
 
 function LeafGlyph() {
   return (

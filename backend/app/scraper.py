@@ -1,15 +1,34 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 from collections.abc import Iterable
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlsplit, urlunsplit
 
 import httpx
 from bs4 import BeautifulSoup
 
 from .config import Settings
 from .models import ListingData
+
+logger = logging.getLogger(__name__)
+
+
+def _zillow_photos_url(url: str) -> str | None:
+    """Return Zillow's gallery URL (`.../photos/`) for a homedetails listing, else None."""
+    parts = urlsplit(url)
+    host = parts.netloc.lower()
+    if "zillow.com" not in host:
+        return None
+    path = parts.path
+    if "/homedetails/" not in path.lower():
+        return None
+    if not path.endswith("/"):
+        path = path + "/"
+    if path.lower().endswith("/photos/"):
+        return None
+    return urlunsplit((parts.scheme, parts.netloc, path + "photos/", "", ""))
 
 
 def _extract_size_from_url(url: str) -> tuple[int, int] | None:
@@ -324,6 +343,26 @@ async def scrape_listing(
         for image_url in best:
             if image_url not in image_pool:
                 image_pool.append(image_url)
+
+        # Second pass: Zillow's `/photos/` gallery page often inlines the full manifest
+        # (including lazy-loaded images) inside __NEXT_DATA__. Fetch it and merge.
+        photos_url = _zillow_photos_url(url)
+        if photos_url:
+            try:
+                photos_html, _ = await _fetch_direct_html(photos_url, timeout_s=cfg.request_timeout_s)
+                photos_soup = BeautifulSoup(photos_html, "lxml")
+                gallery_candidates: list[str] = []
+                gallery_candidates.extend(_extract_zillow_photo_urls(photos_html, max_photos=max_photos * 8))
+                gallery_candidates.extend(_extract_embedded_json_images(photos_soup))
+                gallery_candidates.extend(_extract_jsonld_images(photos_soup))
+                added = 0
+                for image_url in gallery_candidates:
+                    if image_url not in image_pool:
+                        image_pool.append(image_url)
+                        added += 1
+                logger.info("zillow gallery pass added=%s url=%s", added, photos_url)
+            except Exception:
+                logger.exception("zillow gallery pass failed url=%s", photos_url)
 
         # Canonicalize across all collected Zillow variants and keep highest quality per photo id.
         canonical_zillow = _choose_best_zillow_variants(image_pool)

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import shutil
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -220,6 +222,24 @@ async def run_generation_job(
             settings.use_mock_mode,
         )
     logger.info("job=%s complete output=%s", job_id, final_video_path)
+
+    # Library record: written next to the video so /api/library can scan it.
+    library_meta = {
+        "id": job_id,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "title": listing.title,
+        "address": listing.address or request.address,
+        "listing_url": str(request.listing_url) if request.listing_url else None,
+        "voice_style": request.voice_style,
+        "max_photos": request.max_photos,
+        "raw_photo_count": len(raw_paths),
+        "selected_unique_photo_count": selected_unique_count,
+        "video_rel_path": f"{job_id}/walkthrough.mp4",
+    }
+    try:
+        (work_dir / "meta.json").write_text(json.dumps(library_meta, indent=2), encoding="utf-8")
+    except Exception:
+        logger.exception("job=%s failed to write library meta.json", job_id)
 
     return {
         "listing": listing.model_dump(mode="json"),

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from pathlib import Path
+from typing import Any
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -80,6 +82,28 @@ async def get_job(job_id: str) -> JobView:
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
     return job.to_view()
+
+
+@app.get("/api/library")
+async def list_library() -> dict[str, Any]:
+    items: list[dict[str, Any]] = []
+    if not output_dir.exists():
+        return {"items": items}
+    for meta_path in output_dir.glob("*/meta.json"):
+        try:
+            data = json.loads(meta_path.read_text(encoding="utf-8"))
+        except Exception:
+            logger.warning("library: skipping unreadable meta at %s", meta_path)
+            continue
+        rel = data.get("video_rel_path")
+        if not isinstance(rel, str) or not rel:
+            continue
+        if not (output_dir / rel).exists():
+            # Video was deleted but meta lingered; skip to keep the library honest.
+            continue
+        items.append(data)
+    items.sort(key=lambda item: str(item.get("created_at", "")), reverse=True)
+    return {"items": items}
 
 
 output_dir = Path(settings.output_dir)
