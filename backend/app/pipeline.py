@@ -12,11 +12,18 @@ from .config import Settings
 from .home_matcher import HomeConsistencyModel
 from .llm import build_storyboard
 from .media import compose_from_clips, compose_from_images, download_image, download_video, normalize_jpeg
-from .models import GenerateRequest, JobStatus
-from .scraper import listing_from_address, scrape_listing
+from .models import GenerateRequest, JobStatus, ListingData, VisualScope
+from .scraper import filter_image_urls_by_visual_scope, listing_from_address, scrape_listing
 from .seed_clients import SeedSpeechClient, SeedanceClient, SeedreamClient
 
 logger = logging.getLogger(__name__)
+
+
+def _listing_with_scope_ordered_urls(listing: ListingData, scope: VisualScope) -> ListingData:
+    ordered = filter_image_urls_by_visual_scope([str(u) for u in listing.image_urls], scope)
+    payload = listing.model_dump(mode="json")
+    payload["image_urls"] = ordered
+    return ListingData.model_validate(payload)
 
 
 def _ensure_dir(path: Path) -> Path:
@@ -59,10 +66,22 @@ async def run_generation_job(
     clips_dir = _ensure_dir(work_dir / "clips")
 
     set_state(status=JobStatus.running, progress="Reading listing data")
-    logger.info("job=%s started max_photos=%s", job_id, request.max_photos)
+    photo_pool = max(request.max_photos * 5, 24)
+    logger.info(
+        "job=%s started max_photos=%s visual_scope=%s photo_pool=%s",
+        job_id,
+        request.max_photos,
+        request.visual_scope.value,
+        photo_pool,
+    )
     if request.listing_url:
         try:
-            listing = await scrape_listing(str(request.listing_url), max_photos=request.max_photos, settings=settings)
+            listing = await scrape_listing(
+                str(request.listing_url),
+                max_photos=request.max_photos,
+                settings=settings,
+                collect_up_to=photo_pool,
+            )
         except Exception:
             # Many listing sites (e.g., Zillow) block bot-like scraping; degrade gracefully.
             logger.exception("job=%s scrape failed, using address fallback", job_id)
@@ -75,12 +94,20 @@ async def run_generation_job(
     else:
         raise ValueError("Either listing_url or address must be provided.")
 
+    listing = _listing_with_scope_ordered_urls(listing, request.visual_scope)
+    if listing.stats and listing.stats.has_any():
+        set_progress(
+            f"Listing facts: {listing.stats.summary_sentence() or 'scraped details attached'}"
+        )
+        logger.info("job=%s property_stats_found", job_id)
+
     set_progress("Writing narration and scene plan")
     storyboard = await build_storyboard(
         settings,
         listing,
         request.voice_style,
         request.include_neighborhood_copy,
+        request.visual_scope,
     )
 
     seedream = SeedreamClient(settings)
@@ -115,7 +142,9 @@ async def run_generation_job(
                 max_photos=request.max_photos * 3,
                 settings=settings,
                 force_firecrawl=True,
+                collect_up_to=max(photo_pool, request.max_photos * 3),
             )
+            better_listing = _listing_with_scope_ordered_urls(better_listing, request.visual_scope)
             better_raw_paths, better_selected = await _download_and_select_raw_frames(
                 [str(url) for url in better_listing.image_urls],
                 raw_dir,
@@ -151,6 +180,15 @@ async def run_generation_job(
         len(selected_raw_paths),
     )
 
+    scope_polish = ""
+    scope_motion = ""
+    if request.visual_scope == VisualScope.exterior:
+        scope_polish = " Emphasize curb appeal, facade, landscaping, and exterior architecture."
+        scope_motion = " Emphasize wide exterior depth, landscaping, and natural light on the facade."
+    elif request.visual_scope == VisualScope.interior:
+        scope_polish = " Emphasize interior finishes, room flow, and comfortable living spaces."
+        scope_motion = " Emphasize interior spatial flow, room depth, and inviting indoor light."
+
     set_progress("Polishing keyframe photos")
     polished_paths: list[Path] = []
     for idx, raw_path in enumerate(selected_raw_paths, start=1):
@@ -158,7 +196,8 @@ async def run_generation_job(
 
         polish_prompt = (
             f"Polished real-estate keyframe, bright and realistic lighting, "
-            f"premium architectural photography style. Scene note: {storyboard.scenes[scene_index]}"
+            f"premium architectural photography style.{scope_polish} "
+            f"Scene note: {storyboard.scenes[scene_index]}"
         )
         polished_path = polished_dir / f"keyframe_{idx}.jpg"
         try:
@@ -190,7 +229,8 @@ async def run_generation_job(
     for idx, polished in enumerate(polished_paths, start=1):
         motion_prompt = (
             "Cinematic real-estate walkthrough motion, smooth dolly-in and gentle pan, "
-            f"ultra realistic details. Scene: {storyboard.scenes[(idx - 1) % len(storyboard.scenes)]}"
+            f"ultra realistic details.{scope_motion} "
+            f"Scene: {storyboard.scenes[(idx - 1) % len(storyboard.scenes)]}"
         )
         try:
             clip_url = await seedance.image_to_video(polished, motion_prompt)
@@ -208,9 +248,24 @@ async def run_generation_job(
 
     set_progress("Composing final narrated walkthrough video")
     final_video_path = work_dir / "walkthrough.mp4"
+    stats_sidebar: dict[str, Any] | None = None
+    if listing.stats and listing.stats.has_any():
+        title = listing.title.strip() or "Property"
+        if len(title) > 54:
+            title = title[:52] + "…"
+        stats_sidebar = {
+            "title": title,
+            "rows": [{"label": a, "value": b} for a, b in listing.stats.to_sidebar_rows()],
+        }
     if clip_paths:
         logger.info("job=%s compose_mode=clips clip_count=%s", job_id, len(clip_paths))
-        await asyncio.to_thread(compose_from_clips, clip_paths, narration_path, final_video_path)
+        await asyncio.to_thread(
+            compose_from_clips,
+            clip_paths,
+            narration_path,
+            final_video_path,
+            stats_sidebar,
+        )
     else:
         logger.info("job=%s compose_mode=images image_count=%s", job_id, len(polished_paths))
         await asyncio.to_thread(
@@ -220,6 +275,7 @@ async def run_generation_job(
             final_video_path,
             4.0,
             settings.use_mock_mode,
+            stats_sidebar,
         )
     logger.info("job=%s complete output=%s", job_id, final_video_path)
 
@@ -235,6 +291,8 @@ async def run_generation_job(
         "raw_photo_count": len(raw_paths),
         "selected_unique_photo_count": selected_unique_count,
         "video_rel_path": f"{job_id}/walkthrough.mp4",
+        "visual_scope": request.visual_scope.value,
+        "property_stats": listing.stats.model_dump() if listing.stats else None,
     }
     try:
         (work_dir / "meta.json").write_text(json.dumps(library_meta, indent=2), encoding="utf-8")
@@ -243,6 +301,8 @@ async def run_generation_job(
 
     return {
         "listing": listing.model_dump(mode="json"),
+        "visual_scope": request.visual_scope.value,
+        "property_stats": listing.stats.model_dump() if listing.stats else None,
         "requested_max_photos": request.max_photos,
         "raw_photo_count": len(raw_paths),
         "selected_photo_count": len(selected_raw_paths),

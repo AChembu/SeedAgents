@@ -6,13 +6,15 @@ import logging
 from pathlib import Path
 from typing import Any
 
+import httpx
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
+from .chat import run_property_chat
 from .config import get_settings
 from .job_store import InMemoryJobStore
-from .models import GenerateRequest, JobStatus, JobView
+from .models import ChatRequest, ChatResponse, GenerateRequest, JobStatus, JobView
 from .pipeline import run_generation_job
 
 logging.basicConfig(
@@ -40,11 +42,12 @@ def _set_state(job_id: str, **kwargs) -> None:
 
 async def _execute(job_id: str, payload: GenerateRequest) -> None:
     logger.info(
-        "job=%s execute_start listing_url=%s address=%s max_photos=%s",
+        "job=%s execute_start listing_url=%s address=%s max_photos=%s visual_scope=%s",
         job_id,
         bool(payload.listing_url),
         bool(payload.address),
         payload.max_photos,
+        payload.visual_scope.value,
     )
     try:
         artifacts = await run_generation_job(
@@ -82,6 +85,23 @@ async def get_job(job_id: str) -> JobView:
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
     return job.to_view()
+
+
+@app.post("/api/chat", response_model=ChatResponse)
+async def property_chat(payload: ChatRequest) -> ChatResponse:
+    if not payload.messages or payload.messages[-1].role != "user":
+        raise HTTPException(status_code=400, detail="The last message must be from the user.")
+    try:
+        reply = await run_property_chat(settings, payload.messages, payload.property_context)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except httpx.HTTPStatusError as exc:
+        status = exc.response.status_code
+        raise HTTPException(status_code=status, detail=f"Upstream provider error (HTTP {status}).") from exc
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("chat request failed")
+        raise HTTPException(status_code=500, detail="Chat request failed. Please try again.") from exc
+    return ChatResponse(reply=reply)
 
 
 @app.get("/api/library")
