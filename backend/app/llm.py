@@ -6,7 +6,7 @@ import re
 import httpx
 
 from .config import Settings
-from .models import ListingData, Storyboard
+from .models import ListingData, Storyboard, VisualScope
 
 
 def _sanitize_for_voice(text: str) -> str:
@@ -28,6 +28,7 @@ def _clean_listing_for_prompt(listing: ListingData) -> ListingData:
         address=_sanitize_for_voice(listing.address or "") or None,
         image_urls=listing.image_urls,
         source_url=listing.source_url,
+        stats=listing.stats,
     )
 
 
@@ -64,13 +65,30 @@ def _fallback_storyboard(listing: ListingData) -> Storyboard:
     )
 
 
-def _build_prompt(listing: ListingData, voice_style: str, include_neighborhood_copy: bool) -> str:
+def _build_prompt(
+    listing: ListingData,
+    voice_style: str,
+    include_neighborhood_copy: bool,
+    visual_scope: VisualScope,
+) -> str:
+    stats_line = ""
+    if listing.stats and listing.stats.has_any():
+        stats_line = f"Key facts (use naturally, do not sound like reading a datasheet): {listing.stats.summary_sentence()}\n"
+    scope_line = (
+        "Visual focus for this video: only exterior and curb appeal."
+        if visual_scope == VisualScope.exterior
+        else "Visual focus for this video: only interior living spaces."
+        if visual_scope == VisualScope.interior
+        else "Visual focus for this video: mix exterior and interior."
+    )
     return (
         "You are writing a concise real-estate walkthrough narration.\n"
         "Return strict JSON with keys: hook (string), scenes (array of 5 strings), cta (string), full_script (string).\n"
         "Keep full_script to 120-170 words and natural spoken style.\n"
         f"Voice style: {voice_style}\n"
         f"Include neighborhood context: {include_neighborhood_copy}\n"
+        f"{scope_line}\n"
+        f"{stats_line}"
         f"Listing title: {listing.title}\n"
         f"Address: {listing.address or 'N/A'}\n"
         f"Description: {listing.description}\n"
@@ -82,12 +100,13 @@ async def build_storyboard(
     listing: ListingData,
     voice_style: str,
     include_neighborhood_copy: bool,
+    visual_scope: VisualScope = VisualScope.both,
 ) -> Storyboard:
     cleaned_listing = _clean_listing_for_prompt(listing)
     if settings.use_mock_mode:
         return _clean_storyboard_text(_fallback_storyboard(cleaned_listing))
 
-    prompt = _build_prompt(cleaned_listing, voice_style, include_neighborhood_copy)
+    prompt = _build_prompt(cleaned_listing, voice_style, include_neighborhood_copy, visual_scope)
     try:
         if settings.script_provider == "anthropic" and settings.anthropic_api_key:
             async with httpx.AsyncClient(timeout=settings.request_timeout_s) as client:

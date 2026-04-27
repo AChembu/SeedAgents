@@ -1,8 +1,9 @@
 "use client";
 
-import { FormEvent, useMemo, useState } from "react";
+import { FormEvent, useEffect, useMemo, useState } from "react";
 import { Masthead } from "../components/Masthead";
 import { Colophon } from "../components/Colophon";
+import { PropertyChat } from "../components/PropertyChat";
 import { ArrowGlyph } from "../components/Glyphs";
 
 type JobStatus = "queued" | "running" | "completed" | "failed";
@@ -14,6 +15,59 @@ type JobView = {
   error?: string | null;
   artifacts?: Record<string, unknown>;
 };
+
+type VisualScope = "exterior" | "interior" | "both";
+
+type PropertyStatsArtifact = {
+  bedrooms?: number | null;
+  bathrooms?: number | null;
+  living_area_sqft?: number | null;
+  lot_sqft?: number | null;
+  year_built?: number | null;
+};
+
+function formatPropertyStats(stats: PropertyStatsArtifact | null | undefined): string | null {
+  if (!stats) return null;
+  const parts: string[] = [];
+  if (stats.bedrooms != null) parts.push(`${stats.bedrooms} bd`);
+  if (stats.bathrooms != null) parts.push(`${stats.bathrooms} ba`);
+  if (stats.living_area_sqft != null)
+    parts.push(`${stats.living_area_sqft.toLocaleString()} sq ft`);
+  if (stats.lot_sqft != null) parts.push(`lot ${stats.lot_sqft.toLocaleString()} sq ft`);
+  if (stats.year_built != null) parts.push(`built ${stats.year_built}`);
+  return parts.length ? parts.join(" · ") : null;
+}
+
+const CHAT_CONTEXT_STORAGE = "seedestate:chatContext";
+
+function buildPropertyChatContext(
+  artifacts: Record<string, unknown> | undefined,
+  jobId: string
+): Record<string, unknown> | null {
+  if (!artifacts || artifacts.listing == null) {
+    return null;
+  }
+  const story = artifacts.storyboard as
+    | { hook?: string; cta?: string; scenes?: string[]; full_script?: string }
+    | undefined;
+  return {
+    job_id: jobId,
+    listing: artifacts.listing,
+    property_stats: artifacts.property_stats,
+    visual_scope: artifacts.visual_scope,
+    storyboard: story
+      ? {
+          hook: story.hook,
+          cta: story.cta,
+          scenes: story.scenes,
+          full_script: story.full_script
+            ? String(story.full_script).slice(0, 4_000)
+            : undefined
+        }
+      : undefined,
+    selected_source_urls: artifacts.selected_source_urls
+  };
+}
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "http://localhost:8000";
 const POLL_INTERVAL_MS = 3000;
@@ -49,14 +103,42 @@ export default function HomePage() {
   const [address, setAddress] = useState("");
   const [voiceStyle, setVoiceStyle] = useState("friendly luxury real-estate tour");
   const [maxPhotos, setMaxPhotos] = useState(8);
+  const [visualScope, setVisualScope] = useState<VisualScope>("both");
   const [job, setJob] = useState<JobView | null>(null);
   const [loading, setLoading] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
+  const [chatContextStash, setChatContextStash] = useState<Record<string, unknown> | null>(null);
 
   const resultVideo = useMemo(() => {
     const value = job?.artifacts?.video_rel_path;
     if (typeof value !== "string") return "";
     return `${API_BASE}/generated/${value}`;
+  }, [job]);
+
+  useEffect(() => {
+    try {
+      const raw = sessionStorage.getItem(CHAT_CONTEXT_STORAGE);
+      if (raw) {
+        setChatContextStash(JSON.parse(raw) as Record<string, unknown>);
+      }
+    } catch {
+      void 0;
+    }
+  }, []);
+
+  useEffect(() => {
+    if (job?.status !== "completed" || !job.artifacts) {
+      return;
+    }
+    const ctx = buildPropertyChatContext(job.artifacts, job.id);
+    if (ctx) {
+      try {
+        sessionStorage.setItem(CHAT_CONTEXT_STORAGE, JSON.stringify(ctx));
+      } catch {
+        void 0;
+      }
+      setChatContextStash(ctx);
+    }
   }, [job]);
 
   async function onSubmit(event: FormEvent<HTMLFormElement>) {
@@ -103,7 +185,8 @@ export default function HomePage() {
             listing_url: trimmedUrl || undefined,
             address: trimmedAddress || undefined,
             voice_style: trimmedVoice,
-            max_photos: maxPhotos
+            max_photos: maxPhotos,
+            visual_scope: visualScope
           })
         });
       } catch (networkError) {
@@ -168,6 +251,26 @@ export default function HomePage() {
 
   const rawPhotoCount = job?.artifacts?.raw_photo_count;
   const selectedPhotoCount = job?.artifacts?.selected_unique_photo_count;
+  const listingArtifact = job?.artifacts?.listing as { stats?: PropertyStatsArtifact } | undefined;
+  const scrapedStatsLine = formatPropertyStats(listingArtifact?.stats);
+  const visualScopeLabel =
+    job?.artifacts?.visual_scope === "exterior"
+      ? "Exterior"
+      : job?.artifacts?.visual_scope === "interior"
+        ? "Interior"
+        : job?.artifacts?.visual_scope === "both"
+          ? "Interior & exterior"
+          : null;
+
+  const propertyChatContext = useMemo(() => {
+    if (job?.status === "completed" && job.artifacts) {
+      const built = buildPropertyChatContext(job.artifacts, job.id);
+      if (built) {
+        return built;
+      }
+    }
+    return chatContextStash;
+  }, [job, chatContextStash]);
 
   return (
     <main className="page">
@@ -311,6 +414,41 @@ export default function HomePage() {
               </div>
             </div>
 
+            <div className="ledger-row">
+              <div className="label-block">
+                <label id="visual-scope-label">Visual focus</label>
+                <span className="label-num">v.</span>
+              </div>
+              <div className="field-block">
+                <div
+                  className="scope-toggle"
+                  role="radiogroup"
+                  aria-labelledby="visual-scope-label"
+                >
+                  {(
+                    [
+                      { value: "both" as const, label: "Both" },
+                      { value: "exterior" as const, label: "Exterior" },
+                      { value: "interior" as const, label: "Interior" }
+                    ] as const
+                  ).map((opt) => (
+                    <button
+                      key={opt.value}
+                      type="button"
+                      role="radio"
+                      aria-checked={visualScope === opt.value}
+                      onClick={() => setVisualScope(opt.value)}
+                    >
+                      {opt.label}
+                    </button>
+                  ))}
+                </div>
+                <span className="ledger-hint">
+                  Prefer curb appeal and outdoor shots, indoor rooms only, or a balanced mix.
+                </span>
+              </div>
+            </div>
+
             {formError ? (
               <div className="form-error" role="alert">
                 <strong>Check the form</strong>
@@ -409,6 +547,18 @@ export default function HomePage() {
                     </span>
                   </div>
                 ) : null}
+                {visualScopeLabel ? (
+                  <div className="data-pair">
+                    <span className="data-pair-label">Visual focus</span>
+                    <span className="data-pair-value">{visualScopeLabel}</span>
+                  </div>
+                ) : null}
+                {scrapedStatsLine ? (
+                  <div className="data-pair">
+                    <span className="data-pair-label">Listing facts</span>
+                    <span className="data-pair-value">{scrapedStatsLine}</span>
+                  </div>
+                ) : null}
               </div>
 
               {job.error ? (
@@ -431,6 +581,7 @@ export default function HomePage() {
                   </figcaption>
                 </figure>
               ) : null}
+
             </>
           ) : (
             <div className="empty-card reveal">
@@ -438,6 +589,22 @@ export default function HomePage() {
               Fill in the form above and your video will appear here when it&apos;s ready.
             </div>
           )}
+        </section>
+
+        <section className="worksheet" id="ask" style={{ marginTop: 48 }}>
+          <div className="section-head reveal">
+            <span className="folio">Step 03 · Ask</span>
+            <h2>
+              Field <em>Guide.</em>
+            </h2>
+            <p>
+              Chat with an assistant that can use your last generated listing (scraped copy, stats, and
+              walkthrough script) for property-specific questions — or help with general real estate topics.
+            </p>
+          </div>
+          <div className="property-chat-wrap reveal" style={{ animationDelay: "100ms" }}>
+            <PropertyChat apiBase={API_BASE} propertyContext={propertyChatContext} />
+          </div>
         </section>
 
         <Colophon />
